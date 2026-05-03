@@ -1,0 +1,6 @@
+Model,Accuracy,ROC-AUC,CV AUC Mean
+Logistic Regression,0.7993,0.7182,0.9139
+Decision Tree,0.7449,0.6448,0.8497
+Random Forest,0.7993,0.7354,0.9686
+Gradient Boosting,0.8095,0.7324,0.9622
+Support Vector Machine,0.8401,0.7138,0.9604

@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IBM HR Attrition Predictor</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="background-orbs">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+
+    <div class="app-container">
+        <header>
+            <h1>HR Attrition <span>Predictor</span></h1>
+            <p>Powered by advanced Machine Learning</p>
+            
+            <nav class="tab-nav">
+                <button class="tab-btn active" data-target="tab-predictor">Predictor</button>
+                <button class="tab-btn" data-target="tab-eda">Data & EDA</button>
+                <button class="tab-btn" data-target="tab-preprocessing">Pre-processing</button>
+                <button class="tab-btn" data-target="tab-evaluation">Model Evaluation</button>
+                <button class="tab-btn" data-target="tab-selection">Model Selection</button>
+            </nav>
+        </header>
+
+        <main>
+            <!-- TAB 1: PREDICTOR -->
+            <div id="tab-predictor" class="tab-content active">
+            <div class="controls">
+                <button type="button" id="btn-fill-random" class="btn-secondary">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                    Auto-Fill Random Data
+                </button>
+            </div>
+
+            <form id="prediction-form">
+                <div class="form-grid">
+                    <!-- SECTION 1: Personal Info -->
+                    <div class="form-section">
+                        <h2><span class="icon">👤</span> Personal Information</h2>
+                        
+                        <div class="input-group">
+                            <label for="Age">Age</label>
+                            <input type="number" id="Age" name="Age" min="18" max="65" required>
+                        </div>
+                        
+                        <div class="input-group">
+                            <label for="Gender">Gender</label>
+                            <select id="Gender" name="Gender" required>
+                                <option value="Male">Male</option>
+                                <option value="Female">Female</option>
+                            </select>
+                        </div>
+                        
+                        <div class="input-group">
+                            <label for="MaritalStatus">Marital Status</label>
+                            <select id="MaritalStatus" name="MaritalStatus" required>
+                                <option value="Single">Single</option>
+                                <option value="Married">Married</option>
+                                <option value="Divorced">Divorced</option>
+                            </select>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="Education">Education Level</label>
+                            <select id="Education" name="Education" required>
+                                <option value="1">1 - Below College</option>
+                                <option value="2">2 - College</option>
+                                <option value="3">3 - Bachelor</option>
+                                <option value="4">4 - Master</option>
+                                <option value="5">5 - Doctor</option>
+                            </select>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="EducationField">Education Field</label>
+                            <select id="EducationField" name="EducationField" required>
+                                <option value="Life Sciences">Life Sciences</option>
+                                <option value="Medical">Medical</option>
+                                <option value="Marketing">Marketing</option>
+                                <option value="Technical Degree">Technical Degree</option>
+                                <option value="Human Resources">Human Resources</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="DistanceFromHome">Distance From Home (miles)</label>
+                            <input type="number" id="DistanceFromHome" name="DistanceFromHome" min="1" max="50" required>
+                        </div>
+                        
+                        <div class="input-group">
+                            <label for="NumCompaniesWorked">Num Companies Worked</label>
+                            <input type="number" id="NumCompaniesWorked" name="NumCompaniesWorked" min="0" max="15" required>
+                        </div>
+                    </div>
+
+                    <!-- SECTION 2: Job Details -->
+                    <div class="form-section">
+                        <h2><span class="icon">💼</span> Job Details</h2>
+                        
+                        <div class="input-group">
+                            <label for="Department">Department</label>
+                            <select id="Department" name="Department" required>
+                                <option value="Sales">Sales</option>
+                                <option value="Research & Development">Research & Development</option>
+                                <option value="Human Resources">Human Resources</option>
+                            </select>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="JobRole">Job Role</label>
+                            <select id="JobRole" name="JobRole" required>
+                                <option value="Sales Executive">Sales Executive</option>
+                                <option value="Research Scientist">Research Scientist</option>
+                                <option value="Laboratory Technician">Laboratory Technician</option>
+                                <option value="Manufacturing Director">Manufacturing Director</option>
+                                <option value="Healthcare Representative">Healthcare Representative</option>
+                                <option value="Manager">Manager</option>
+                                <option value="Sales Representative">Sales Representative</option>
+                                <option value="Research Director">Research Director</option>
+                                <option value="Human Resources">Human Resources</option>
+                            </select>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="JobLevel">Job Level</label>
+                            <select id="JobLevel" name="JobLevel" required>
+                                <option value="1">1 - Entry</option>
+                                <option value="2">2 - Intermediate</option>
+                                <option value="3">3 - Experienced</option>
+                                <option value="4">4 - Advanced</option>
+                                <option value="5">5 - Expert</option>
+                            </select>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="BusinessTravel">Business Travel</label>
+                            <select id="BusinessTravel" name="BusinessTravel" required>
+                                <option value="Non-Travel">Non-Travel</option>
+                                <option value="Travel_Rarely">Travel Rarely</option>
+                                <option value="Travel_Frequently">Travel Frequently</option>
+                            </select>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="MonthlyIncome">Monthly Income ($)</label>
+                            <input type="number" id="MonthlyIncome" name="MonthlyIncome" min="1000" max="25000" required>
+                        </div>
+
+                        <div class="input-group hidden-advanced">
+                            <label for="DailyRate">Daily Rate</label>
+                            <input type="number" id="DailyRate" name="DailyRate" min="100" max="2000" required>
+                        </div>
+
+                        <div class="input-group hidden-advanced">
+                            <label for="HourlyRate">Hourly Rate</label>
+                            <input type="number" id="HourlyRate" name="HourlyRate" min="30" max="100" required>
+                        </div>
+
+                        <div class="input-group hidden-advanced">
+                            <label for="MonthlyRate">Monthly Rate</label>
+                            <input type="number" id="MonthlyRate" name="MonthlyRate" min="2000" max="30000" required>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="PercentSalaryHike">Percent Salary Hike (%)</label>
+                            <input type="number" id="PercentSalaryHike" name="PercentSalaryHike" min="10" max="30" required>
+                        </div>
+                        
+                        <div class="input-group">
+                            <label for="OverTime">OverTime</label>
+                            <select id="OverTime" name="OverTime" required>
+                                <option value="No">No</option>
+                                <option value="Yes">Yes</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- SECTION 3: Satisfaction & History -->
+                    <div class="form-section">
+                        <h2><span class="icon">⭐</span> Satisfaction & History</h2>
+                        
+                        <div class="satisfaction-grid">
+                            <div class="input-group">
+                                <label for="EnvironmentSatisfaction">Environment</label>
+                                <select id="EnvironmentSatisfaction" name="EnvironmentSatisfaction" required>
+                                    <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                                </select>
+                            </div>
+                            
+                            <div class="input-group">
+                                <label for="JobSatisfaction">Job</label>
+                                <select id="JobSatisfaction" name="JobSatisfaction" required>
+                                    <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                                </select>
+                            </div>
+
+                            <div class="input-group">
+                                <label for="RelationshipSatisfaction">Relationship</label>
+                                <select id="RelationshipSatisfaction" name="RelationshipSatisfaction" required>
+                                    <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                                </select>
+                            </div>
+                            
+                            <div class="input-group">
+                                <label for="JobInvolvement">Involvement</label>
+                                <select id="JobInvolvement" name="JobInvolvement" required>
+                                    <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                                </select>
+                            </div>
+                            
+                            <div class="input-group">
+                                <label for="WorkLifeBalance">Work-Life Balance</label>
+                                <select id="WorkLifeBalance" name="WorkLifeBalance" required>
+                                    <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                                </select>
+                            </div>
+
+                            <div class="input-group">
+                                <label for="PerformanceRating">Performance</label>
+                                <select id="PerformanceRating" name="PerformanceRating" required>
+                                    <option value="3">3 - Excellent</option><option value="4">4 - Outstanding</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div class="divider"></div>
+
+                        <div class="history-grid">
+                            <div class="input-group">
+                                <label for="TotalWorkingYears">Total Years</label>
+                                <input type="number" id="TotalWorkingYears" name="TotalWorkingYears" min="0" max="40" required>
+                            </div>
+                            
+                            <div class="input-group">
+                                <label for="YearsAtCompany">At Company</label>
+                                <input type="number" id="YearsAtCompany" name="YearsAtCompany" min="0" max="40" required>
+                            </div>
+                            
+                            <div class="input-group">
+                                <label for="YearsInCurrentRole">In Role</label>
+                                <input type="number" id="YearsInCurrentRole" name="YearsInCurrentRole" min="0" max="40" required>
+                            </div>
+                            
+                            <div class="input-group">
+                                <label for="YearsSinceLastPromotion">Since Promotion</label>
+                                <input type="number" id="YearsSinceLastPromotion" name="YearsSinceLastPromotion" min="0" max="15" required>
+                            </div>
+                            
+                            <div class="input-group">
+                                <label for="YearsWithCurrManager">With Manager</label>
+                                <input type="number" id="YearsWithCurrManager" name="YearsWithCurrManager" min="0" max="20" required>
+                            </div>
+                            
+                            <div class="input-group">
+                                <label for="TrainingTimesLastYear">Training</label>
+                                <input type="number" id="TrainingTimesLastYear" name="TrainingTimesLastYear" min="0" max="10" required>
+                            </div>
+                        </div>
+
+                        <div class="input-group" style="margin-top: 15px;">
+                            <label for="StockOptionLevel">Stock Option Level</label>
+                            <select id="StockOptionLevel" name="StockOptionLevel" required>
+                                <option value="0">0</option>
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="action-panel">
+                    <button type="submit" id="btn-predict" class="btn-primary">
+                        <span>Predict Attrition Risk</span>
+                        <div class="loader" id="loader"></div>
+                    </button>
+                </div>
+            </form>
+            </div> <!-- End Tab Predictor -->
+
+            <!-- TAB 2: DATA & EDA -->
+            <div id="tab-eda" class="tab-content">
+                <div class="report-section">
+                    <h2>Data Exploration & EDA</h2>
+                    <p>The IBM HR Attrition dataset contains 1,470 records and 35 features. Initial exploration revealed an imbalance in the target variable (Attrition), with roughly 84% 'No' and 16% 'Yes'.</p>
+                    
+                    <div class="image-grid">
+                        <div class="img-card">
+                            <h3>Attrition Distribution</h3>
+                            <img src="/outputs/eda/attrition_distribution.png" alt="Attrition Distribution">
+                        </div>
+                        <div class="img-card">
+                            <h3>Categorical Features vs Attrition</h3>
+                            <img src="/outputs/eda/categorical_countplots.png" alt="Categorical Features">
+                        </div>
+                        <div class="img-card">
+                            <h3>Numeric Features Boxplots</h3>
+                            <img src="/outputs/eda/numeric_boxplots.png" alt="Numeric Features">
+                        </div>
+                        <div class="img-card">
+                            <h3>Correlation Matrix</h3>
+                            <img src="/outputs/eda/correlation_matrix.png" alt="Correlation Matrix">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 3: PRE-PROCESSING -->
+            <div id="tab-preprocessing" class="tab-content">
+                <div class="report-section">
+                    <h2>Data Pre-processing Steps</h2>
+                    <ul class="process-list">
+                        <li><strong>Feature Removal:</strong> Dropped constant/unhelpful columns such as <code>EmployeeCount</code>, <code>EmployeeNumber</code>, <code>Over18</code>, and <code>StandardHours</code>.</li>
+                        <li><strong>Target Encoding:</strong> Encoded the target variable 'Attrition' (Yes=1, No=0).</li>
+                        <li><strong>Label Encoding:</strong> Applied LabelEncoding to categorical columns like <code>BusinessTravel</code>, <code>Department</code>, <code>EducationField</code>, <code>Gender</code>, <code>JobRole</code>, and <code>MaritalStatus</code>.</li>
+                        <li><strong>Data Splitting:</strong> Splitted data into 80% training and 20% testing sets using stratified sampling to maintain class proportions.</li>
+                        <li><strong>Class Imbalance Handling:</strong> Applied Synthetic Minority Over-sampling Technique (SMOTE) strictly on the training set to create a balanced dataset (50/50).</li>
+                        <li><strong>Feature Scaling:</strong> Applied Standard Scaling on features for distance-based models (Logistic Regression, SVM). Tree-based models used unscaled data.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- TAB 4: EVALUATION -->
+            <div id="tab-evaluation" class="tab-content">
+                <div class="report-section">
+                    <h2>Model Fitting & Evaluation</h2>
+                    <p>Five different machine learning algorithms were trained separately on the pre-processed data. Below are the individual performance metrics for each model's training phase on the test set.</p>
+                    
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <h3>Logistic Regression</h3>
+                            <div class="stat"><span class="label">Accuracy:</span> 0.7993</div>
+                            <div class="stat"><span class="label">ROC-AUC:</span> 0.7182</div>
+                            <div class="stat"><span class="label">CV AUC:</span> 0.9139</div>
+                        </div>
+                        <div class="metric-card">
+                            <h3>Decision Tree</h3>
+                            <div class="stat"><span class="label">Accuracy:</span> 0.7449</div>
+                            <div class="stat"><span class="label">ROC-AUC:</span> 0.6448</div>
+                            <div class="stat"><span class="label">CV AUC:</span> 0.8497</div>
+                        </div>
+                        <div class="metric-card highlight">
+                            <h3>Random Forest</h3>
+                            <div class="stat"><span class="label">Accuracy:</span> 0.7993</div>
+                            <div class="stat"><span class="label">ROC-AUC:</span> 0.7354</div>
+                            <div class="stat"><span class="label">CV AUC:</span> 0.9686</div>
+                        </div>
+                        <div class="metric-card">
+                            <h3>Gradient Boosting</h3>
+                            <div class="stat"><span class="label">Accuracy:</span> 0.8095</div>
+                            <div class="stat"><span class="label">ROC-AUC:</span> 0.7324</div>
+                            <div class="stat"><span class="label">CV AUC:</span> 0.9622</div>
+                        </div>
+                        <div class="metric-card">
+                            <h3>Support Vector Machine</h3>
+                            <div class="stat"><span class="label">Accuracy:</span> 0.8401</div>
+                            <div class="stat"><span class="label">ROC-AUC:</span> 0.7138</div>
+                            <div class="stat"><span class="label">CV AUC:</span> 0.9604</div>
+                        </div>
+                    </div>
+                    
+                    <div class="image-grid" style="margin-top: 3rem;">
+                        <div class="img-card full-width">
+                            <h3>ROC Curves (Visual Comparison)</h3>
+                            <img src="/outputs/roc_curves.png" alt="ROC Curves">
+                        </div>
+                        <div class="img-card full-width">
+                            <h3>Confusion Matrices (Detailed Breakdown)</h3>
+                            <img src="/outputs/confusion_matrices.png" alt="Confusion Matrices">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 5: SELECTION -->
+            <div id="tab-selection" class="tab-content">
+                <div class="report-section">
+                    <h2>Reasons for Model Selection</h2>
+                    <p><strong>Random Forest</strong> was selected as the final model because it exhibited the highest and most stable Cross-Validation AUC (~0.96) and solid precision/recall balance. Tree-based models are also robust to outliers and require less strict feature scaling.</p>
+                    <p>Hyperparameter tuning via RandomizedSearchCV was applied to the Random Forest model to optimize depth, estimators, and splits.</p>
+                    
+                    <div class="image-grid">
+                        <div class="img-card">
+                            <h3>Feature Importance</h3>
+                            <img src="/outputs/feature_importance.png" alt="Feature Importance">
+                        </div>
+                        <div class="img-card">
+                            <h3>SHAP Explainability Summary</h3>
+                            <p class="small-text">SHAP values show the directional impact of features on the prediction (e.g. OverTime, MonthlyIncome).</p>
+                            <img src="/outputs/shap_summary.png" alt="SHAP Summary">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- Result Modal / Overlay -->
+        <div id="result-overlay" class="overlay hidden">
+            <div class="result-card">
+                <button id="close-result" class="close-btn">&times;</button>
+                <div class="result-header">
+                    <h3 id="result-title">Prediction Result</h3>
+                </div>
+                <div class="result-body">
+                    <div class="risk-meter">
+                        <svg viewBox="0 0 100 50" class="gauge">
+                            <path class="gauge-bg" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" />
+                            <path class="gauge-fill" id="gauge-fill" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke-dasharray="125.6" stroke-dashoffset="125.6" />
+                        </svg>
+                        <div class="risk-score">
+                            <span id="risk-value">0</span>%
+                        </div>
+                    </div>
+                    <div class="prediction-text">
+                        The model predicts this employee will 
+                        <strong id="pred-outcome" class="badge">STAY</strong>
+                    </div>
+                    <p class="insight-text" id="insight-text">
+                        With a <span id="stay-prob"></span>% probability of staying, this employee shows strong retention signals.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
