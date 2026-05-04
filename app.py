@@ -14,7 +14,7 @@ import boto3
 
 load_dotenv()
 
-app = FastAPI(title="HR Attrition Prediction API")
+app = FastAPI(title="AttritionIQ — HR Attrition Prediction API")
 
 # AWS region
 AWS_REGION = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
@@ -26,6 +26,18 @@ TABLE_NAME = "HR_Attrition_Predictions"
 
 # Initialize S3 client
 s3_client = boto3.client('s3', region_name=AWS_REGION)
+
+# ── SNS: High-risk attrition alerts ─────────────────────────
+SNS_TOPIC_ARN = os.getenv('SNS_TOPIC_ARN')
+sns_client = boto3.client('sns', region_name=AWS_REGION) if SNS_TOPIC_ARN else None
+SNS_RISK_THRESHOLD = 0.70   # alert when leave prob exceeds this
+
+# ── SageMaker: managed inference endpoint ───────────────────
+SAGEMAKER_ENDPOINT = os.getenv('SAGEMAKER_ENDPOINT_NAME')
+sm_runtime = boto3.client('sagemaker-runtime', region_name=AWS_REGION) if SAGEMAKER_ENDPOINT else None
+
+print(f"SNS alerts    : {'enabled' if sns_client else 'disabled (SNS_TOPIC_ARN not set)'}")
+print(f"SageMaker     : {'endpoint=' + SAGEMAKER_ENDPOINT if sm_runtime else 'disabled (using local model)'}")
 
 def initialize_dynamodb():
     table = dynamodb.Table(TABLE_NAME)
@@ -210,12 +222,48 @@ def predict(data: EmployeeData):
         else:
             X = input_df
             
-        prediction = model.predict(X)[0]
-        probability = model.predict_proba(X)[0][1] # Probability of "Leave" (class 1)
-        
+        # ── Inference: SageMaker endpoint or local model ────────
+        if sm_runtime and SAGEMAKER_ENDPOINT:
+            import json as _json
+            sm_payload = _json.dumps(input_df.values.tolist())
+            sm_response = sm_runtime.invoke_endpoint(
+                EndpointName = SAGEMAKER_ENDPOINT,
+                ContentType  = 'application/json',
+                Body         = sm_payload
+            )
+            sm_result  = _json.loads(sm_response['Body'].read())
+            prediction = 1 if sm_result.get('prediction') == 'Leave' else 0
+            probability = sm_result.get('leave_probability', 0.5)
+        else:
+            prediction  = model.predict(X)[0]
+            probability = model.predict_proba(X)[0][1]
+
         prediction_result = "Leave" if prediction == 1 else "Stay"
         leave_prob = float(probability)
-        stay_prob = 1.0 - leave_prob
+        stay_prob  = 1.0 - leave_prob
+
+        # ── SNS: Alert HR if high attrition risk ─────────────────
+        if sns_client and SNS_TOPIC_ARN and leave_prob >= SNS_RISK_THRESHOLD:
+            try:
+                age  = data_dict.get('Age', 'N/A')
+                role = data_dict.get('JobRole', 'N/A')
+                dept = data_dict.get('Department', 'N/A')
+                sns_client.publish(
+                    TopicArn = SNS_TOPIC_ARN,
+                    Subject  = f'AttritionIQ ⚠️ High Risk Alert — {leave_prob:.0%} Leave Probability',
+                    Message  = (
+                        f'High attrition risk detected!\n\n'
+                        f'  Risk Score  : {leave_prob:.1%} probability of leaving\n'
+                        f'  Age         : {age}\n'
+                        f'  Role        : {role}\n'
+                        f'  Department  : {dept}\n'
+                        f'  Overtime    : {data_dict.get("OverTime", "N/A")}\n\n'
+                        f'Please review this employee\'s engagement and retention plan.'
+                    )
+                )
+                print(f"SNS alert sent for high-risk prediction ({leave_prob:.1%})")
+            except Exception as sns_err:
+                print(f"SNS alert failed (non-critical): {sns_err}")
         
         # Save prediction log to DynamoDB
         try:

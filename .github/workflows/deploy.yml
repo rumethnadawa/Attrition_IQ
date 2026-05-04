@@ -1,0 +1,219 @@
+name: AttritionIQ CI/CD Pipeline
+
+on:
+  push:
+    branches: [AttritionIQ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION:       us-east-1
+  ECR_REPOSITORY:   attritioniq-app
+  ECS_CLUSTER:      attritioniq-cluster
+  ECS_SERVICE:      attritioniq-service
+  CONTAINER_NAME:   attritioniq-container
+  TASK_FAMILY:      attritioniq-task
+
+# ──────────────────────────────────────────────────────────────
+jobs:
+
+  # ── Stage 1: Test ──────────────────────────────────────────
+  test:
+    name: "🧪 Run Test Suite"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest httpx
+
+      - name: Run pytest
+        run: pytest tests/ -v --tb=short
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    ${{ env.AWS_REGION }}
+          S3_BUCKET_NAME:        ${{ secrets.S3_BUCKET }}
+
+  # ── Stage 2: Build & Push Docker Image to ECR ──────────────
+  build:
+    name: "🐳 Build & Push to ECR"
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push  $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag   $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                       $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push  $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  # ── Stage 3: SageMaker Training Job ────────────────────────
+  sagemaker-train:
+    name: "🤖 SageMaker Training"
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install SageMaker SDK
+        run: pip install boto3 sagemaker python-dotenv
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Create .env for pipeline script
+        run: |
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"     >> .env
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> .env
+          echo "AWS_DEFAULT_REGION=${{ env.AWS_REGION }}"               >> .env
+          echo "S3_BUCKET_NAME=${{ secrets.S3_BUCKET }}"                >> .env
+
+      - name: Run SageMaker training job
+        run: |
+          python sagemaker_pipeline.py \
+            --mode train \
+            --job-suffix ${{ github.sha }} \
+            --s3-bucket  ${{ secrets.S3_BUCKET }}
+
+      - name: Upload model URI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sagemaker-model-uri
+          path: .sagemaker_model_uri
+
+  # ── Stage 4: Deploy to ECS Fargate ─────────────────────────
+  deploy-ecs:
+    name: "🚀 Deploy to ECS Fargate"
+    needs: [build, sagemaker-train]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Download current ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.TASK_FAMILY }} \
+            --query taskDefinition \
+            > task-definition.json
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name:  ${{ env.CONTAINER_NAME }}
+          image:           ${{ needs.build.outputs.image }}
+
+      - name: Deploy updated task to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition:          ${{ steps.task-def.outputs.task-definition }}
+          service:                  ${{ env.ECS_SERVICE }}
+          cluster:                  ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+  # ── Stage 5: Verify Live Deployment ────────────────────────
+  verify:
+    name: "✅ Verify Deployment"
+    needs: deploy-ecs
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install boto3
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Run health check against live ECS task
+        run: python .github/scripts/verify_deployment.py
+        env:
+          ECS_CLUSTER:        ${{ env.ECS_CLUSTER }}
+          ECS_SERVICE:        ${{ env.ECS_SERVICE }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+
+  # ── Stage 6: Notify via SNS ────────────────────────────────
+  notify:
+    name: "📣 Pipeline Notification"
+    needs: verify
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Send pipeline result via SNS
+        run: |
+          STATUS="${{ needs.verify.result }}"
+          if [ "$STATUS" = "success" ]; then
+            MSG="✅ AttritionIQ deployment SUCCEEDED on commit ${{ github.sha }} by ${{ github.actor }}"
+          else
+            MSG="❌ AttritionIQ deployment FAILED on commit ${{ github.sha }}. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+          aws sns publish \
+            --topic-arn "${{ secrets.SNS_TOPIC_ARN }}" \
+            --subject   "AttritionIQ CI/CD — $STATUS" \
+            --message   "$MSG" || echo "SNS publish skipped (topic not configured)"
