@@ -16,16 +16,24 @@ load_dotenv()
 
 app = FastAPI(title="HR Attrition Prediction API")
 
+# AWS region
+AWS_REGION = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+S3_BUCKET  = os.getenv('S3_BUCKET_NAME')
+
 # Initialize DynamoDB
-dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_DEFAULT_REGION', 'us-east-1'))
+dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
 TABLE_NAME = "HR_Attrition_Predictions"
 
+# Initialize S3 client
+s3_client = boto3.client('s3', region_name=AWS_REGION)
+
 def initialize_dynamodb():
+    table = dynamodb.Table(TABLE_NAME)
     try:
-        table = dynamodb.Table(TABLE_NAME)
-        table.load()
-    except Exception as e:
-        print(f"Creating DynamoDB table {TABLE_NAME}...")
+        table.load()  # Raises ResourceNotFoundException if table doesn't exist
+        print(f"DynamoDB table '{TABLE_NAME}' is ready.")
+    except dynamodb.meta.client.exceptions.ResourceNotFoundException:
+        print(f"Creating DynamoDB table '{TABLE_NAME}'...")
         table = dynamodb.create_table(
             TableName=TABLE_NAME,
             KeySchema=[
@@ -40,6 +48,9 @@ def initialize_dynamodb():
         )
         table.meta.client.get_waiter('table_exists').wait(TableName=TABLE_NAME)
         print("Table created successfully!")
+    except Exception as e:
+        # Log but don't crash — app can still serve predictions without DynamoDB
+        print(f"[WARNING] Could not initialize DynamoDB table: {e}")
 
 initialize_dynamodb()
 
@@ -54,10 +65,8 @@ MODEL_DIR = "models"
 DATA_PATH = "WA_Fn-UseC_-HR-Employee-Attrition.csv"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-s3_bucket = os.getenv("S3_BUCKET_NAME")
-if s3_bucket:
-    print(f"Syncing artifacts from S3 bucket: {s3_bucket}...")
-    s3 = boto3.client('s3', region_name=os.getenv('AWS_DEFAULT_REGION', 'us-east-1'))
+if S3_BUCKET:
+    print(f"Syncing artifacts from S3 bucket: {S3_BUCKET}...")
     artifacts_to_download = [
         ("data/WA_Fn-UseC_-HR-Employee-Attrition.csv", DATA_PATH),
         ("models/best_model.pkl", f"{MODEL_DIR}/best_model.pkl"),
@@ -66,10 +75,10 @@ if s3_bucket:
     ]
     for s3_key, local_path in artifacts_to_download:
         try:
-            s3.download_file(s3_bucket, s3_key, local_path)
-            print(f"Downloaded {s3_key} from S3.")
+            s3_client.download_file(S3_BUCKET, s3_key, local_path)
+            print(f"  -> Downloaded {s3_key} from S3.")
         except Exception as e:
-            print(f"Could not download {s3_key}: {e}")
+            print(f"  ! Could not download {s3_key}: {e}")
 
 model = joblib.load(f"{MODEL_DIR}/best_model.pkl")
 feature_names = joblib.load(f"{MODEL_DIR}/feature_names.pkl")
@@ -118,9 +127,60 @@ class EmployeeData(BaseModel):
     YearsSinceLastPromotion: int
     YearsWithCurrManager: int
 
+@app.get("/health")
+def health_check():
+    """ECS / load balancer health check endpoint."""
+    return {"status": "ok", "service": "AttritionIQ"}
+
 @app.get("/")
 def read_root():
     return FileResponse("static/index.html")
+
+@app.get("/charts")
+def get_chart_urls():
+    """
+    Returns presigned S3 URLs (valid 1 hour) for all pipeline-generated charts.
+    Falls back to local /outputs paths if S3 is not configured.
+    """
+    chart_keys = {
+        "roc_curves":              "outputs/roc_curves.png",
+        "confusion_matrices":      "outputs/confusion_matrices.png",
+        "feature_importance":      "outputs/feature_importance.png",
+        "shap_summary":            "outputs/shap_summary.png",
+        "attrition_distribution":  "outputs/eda/attrition_distribution.png",
+        "numeric_boxplots":        "outputs/eda/numeric_boxplots.png",
+        "categorical_countplots":  "outputs/eda/categorical_countplots.png",
+        "correlation_matrix":      "outputs/eda/correlation_matrix.png",
+    }
+
+    urls = {}
+    if S3_BUCKET:
+        for name, s3_key in chart_keys.items():
+            try:
+                url = s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': S3_BUCKET, 'Key': s3_key},
+                    ExpiresIn=3600  # 1 hour
+                )
+                urls[name] = url
+            except Exception as e:
+                urls[name] = None
+                print(f"Could not generate presigned URL for {s3_key}: {e}")
+    else:
+        # Fallback: local static paths
+        local_map = {
+            "roc_curves":             "/outputs/roc_curves.png",
+            "confusion_matrices":     "/outputs/confusion_matrices.png",
+            "feature_importance":     "/outputs/feature_importance.png",
+            "shap_summary":           "/outputs/shap_summary.png",
+            "attrition_distribution": "/outputs/eda/attrition_distribution.png",
+            "numeric_boxplots":       "/outputs/eda/numeric_boxplots.png",
+            "categorical_countplots": "/outputs/eda/categorical_countplots.png",
+            "correlation_matrix":     "/outputs/eda/correlation_matrix.png",
+        }
+        urls = local_map
+
+    return {"source": "s3" if S3_BUCKET else "local", "charts": urls}
 
 @app.post("/predict")
 def predict(data: EmployeeData):

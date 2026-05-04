@@ -13,7 +13,42 @@ document.addEventListener('DOMContentLoaded', () => {
     const insightText = document.getElementById('insight-text');
     const stayProbText = document.getElementById('stay-prob');
 
-    // Handle Form Submit
+    // ─── Dynamic Chart Loading via /charts API ──────────────────
+    // Maps chart API key -> img element id
+    const CHART_IMG_MAP = {
+        attrition_distribution:  'img-attrition-distribution',
+        categorical_countplots:  'img-categorical-countplots',
+        numeric_boxplots:        'img-numeric-boxplots',
+        correlation_matrix:      'img-correlation-matrix',
+        roc_curves:              'img-roc-curves',
+        confusion_matrices:      'img-confusion-matrices',
+        feature_importance:      'img-feature-importance',
+        shap_summary:            'img-shap-summary',
+    };
+
+    async function loadCharts() {
+        try {
+            const response = await fetch('/charts');
+            if (!response.ok) return;
+            const data = await response.json();
+            const charts = data.charts || {};
+            for (const [key, url] of Object.entries(charts)) {
+                if (!url) continue;
+                const imgId = CHART_IMG_MAP[key];
+                if (imgId) {
+                    const el = document.getElementById(imgId);
+                    if (el) el.src = url;
+                }
+            }
+        } catch (err) {
+            console.warn('Could not load chart URLs from /charts API:', err);
+            // Charts will fall back to the static /outputs/ src already set in HTML
+        }
+    }
+
+    loadCharts();
+
+    // ─── Handle Form Submit ─────────────────────────────────────
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
         
@@ -117,7 +152,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 300);
     });
 
-    // Random Data Generator
+    // ─── Random Data Generator ──────────────────────────────────
     btnRandom.addEventListener('click', () => {
         const randomData = {
             Age: rnd(22, 60),
@@ -155,7 +190,7 @@ document.addEventListener('DOMContentLoaded', () => {
             StockOptionLevel: rnd(0, 3)
         };
         
-        // Simple validation rule adjustments to make data look more realistic
+        // Validation rules to make data look realistic
         if (randomData.YearsAtCompany > randomData.TotalWorkingYears) randomData.TotalWorkingYears = randomData.YearsAtCompany + rnd(0, 5);
         if (randomData.YearsInCurrentRole > randomData.YearsAtCompany) randomData.YearsInCurrentRole = randomData.YearsAtCompany;
         if (randomData.YearsSinceLastPromotion > randomData.YearsAtCompany) randomData.YearsSinceLastPromotion = randomData.YearsAtCompany;
@@ -167,14 +202,14 @@ document.addEventListener('DOMContentLoaded', () => {
             if (el) el.value = value;
         }
         
-        // Add a slight pulse effect to show it worked
+        // Pulse effect to show it worked
         form.style.transform = 'scale(0.99)';
         setTimeout(() => {
             form.style.transform = 'scale(1)';
         }, 150);
     });
 
-    // Helpers
+    // ─── Helpers ────────────────────────────────────────────────
     function rnd(min, max) {
         return Math.floor(Math.random() * (max - min + 1)) + min;
     }
@@ -182,20 +217,16 @@ document.addEventListener('DOMContentLoaded', () => {
     function rChoice(arr) {
         return arr[Math.floor(Math.random() * arr.length)];
     }
-    // Tab Navigation Logic
+
+    // ─── Tab Navigation ─────────────────────────────────────────
     const tabBtns = document.querySelectorAll('.tab-btn');
     const tabContents = document.querySelectorAll('.tab-content');
 
     tabBtns.forEach(btn => {
         btn.addEventListener('click', () => {
-            // Remove active class from all buttons and contents
             tabBtns.forEach(b => b.classList.remove('active'));
             tabContents.forEach(c => c.classList.remove('active'));
-
-            // Add active class to clicked button
             btn.classList.add('active');
-
-            // Show corresponding tab content
             const targetId = btn.getAttribute('data-target');
             document.getElementById(targetId).classList.add('active');
         });
