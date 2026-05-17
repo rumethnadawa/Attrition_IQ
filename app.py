@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -9,12 +9,54 @@ from sklearn.preprocessing import LabelEncoder
 import os
 import uuid
 import datetime
+import logging
+import json
+import time
 from dotenv import load_dotenv
 import boto3
 
 load_dotenv()
 
+# ── Structured JSON Logger ───────────────────────────────────
+class JsonFormatter(logging.Formatter):
+    """Emit logs as single-line JSON — queryable in CloudWatch Insights."""
+    def format(self, record):
+        log = {
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "level":     record.levelname,
+            "service":   "AttritionIQ",
+            "message":   record.getMessage(),
+        }
+        if record.exc_info:
+            log["exception"] = self.formatException(record.exc_info)
+        if hasattr(record, "extra"):
+            log.update(record.extra)
+        return json.dumps(log)
+
+logger = logging.getLogger("attritioniq")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logger.addHandler(handler)
+logger.propagate = False
+
+
 app = FastAPI(title="AttritionIQ — HR Attrition Prediction API")
+
+# ── Request / Response Logging Middleware ────────────────────
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log every request + response latency as structured JSON."""
+    start    = time.time()
+    response = await call_next(request)
+    latency  = round((time.time() - start) * 1000, 2)
+    logger.info("http_request", extra={
+        "method":     request.method,
+        "path":       request.url.path,
+        "status":     response.status_code,
+        "latency_ms": latency,
+    })
+    return response
 
 # AWS region
 AWS_REGION = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
@@ -38,6 +80,11 @@ sm_runtime = boto3.client('sagemaker-runtime', region_name=AWS_REGION) if SAGEMA
 
 print(f"SNS alerts    : {'enabled' if sns_client else 'disabled (SNS_TOPIC_ARN not set)'}")
 print(f"SageMaker     : {'endpoint=' + SAGEMAKER_ENDPOINT if sm_runtime else 'disabled (using local model)'}")
+logger.info("startup", extra={
+    "sns_alerts": "enabled" if sns_client else "disabled",
+    "sagemaker":  SAGEMAKER_ENDPOINT if sm_runtime else "local-model",
+    "s3_bucket":  S3_BUCKET or "not-configured",
+})
 
 def initialize_dynamodb():
     table = dynamodb.Table(TABLE_NAME)

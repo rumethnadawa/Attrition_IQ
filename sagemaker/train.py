@@ -122,7 +122,7 @@ if __name__ == "__main__":
         )
 
     # ─── Save Artifacts ─────────────────────────────────────
-    print(f"\n[5/5] Saving artifacts to {args.model_dir}...")
+    print(f"\n[5/6] Saving artifacts to {args.model_dir}...")
     os.makedirs(args.model_dir, exist_ok=True)
     os.makedirs(args.output_data_dir, exist_ok=True)
 
@@ -137,6 +137,59 @@ if __name__ == "__main__":
         json.dump(metrics, f)
 
     print("  -> All artifacts saved!")
+
+    # ─── Register in SageMaker Model Registry ───────────────
+    print(f"\n[6/6] Registering model in SageMaker Model Registry...")
+    s3_bucket = os.environ.get("SM_HP_S3_BUCKET_NAME",
+                os.environ.get("S3_BUCKET_NAME", ""))
+    model_package_group = "AttritionIQ-Models"
+
+    # Determine the model S3 URI (set by SageMaker after training)
+    output_path = os.environ.get("SM_OUTPUT_DATA_DIR", args.output_data_dir)
+    model_s3_uri = os.environ.get(
+        "SM_MODEL_DIR",
+        f"s3://{s3_bucket}/sagemaker/output/model.tar.gz" if s3_bucket else ""
+    )
+
+    if model_s3_uri and s3_bucket:
+        try:
+            import boto3
+            sm_client = boto3.client("sagemaker")
+            sm_client.create_model_package(
+                ModelPackageGroupName=model_package_group,
+                ModelPackageDescription=f"ROC-AUC: {roc_auc:.4f} | n_estimators: {args.n_estimators}",
+                InferenceSpecification={
+                    "Containers": [
+                        {
+                            "Image": os.environ.get("SAGEMAKER_CONTAINER_IMAGE", ""),
+                            "ModelDataUrl": model_s3_uri,
+                            "Framework": "SKLEARN",
+                            "FrameworkVersion": "1.2-1",
+                        }
+                    ],
+                    "SupportedContentTypes":  ["application/json"],
+                    "SupportedResponseMIMETypes": ["application/json"],
+                },
+                ModelApprovalStatus="PendingManualApproval",  # Requires human sign-off
+                ModelMetrics={
+                    "ModelQuality": {
+                        "Statistics": {
+                            "ContentType": "application/json",
+                            "S3Uri": f"s3://{s3_bucket}/sagemaker/metrics/metrics.json",
+                        }
+                    }
+                },
+            )
+            print(f"  -> Registered in Model Registry: {model_package_group}")
+            print(f"     Status: PendingManualApproval")
+            print(f"     ROC-AUC: {roc_auc:.4f}")
+            print(f"     Approve at: SageMaker Studio -> Model Registry -> {model_package_group}")
+        except Exception as reg_err:
+            # Non-fatal — training still succeeded
+            print(f"  [WARN] Model Registry registration failed (non-critical): {reg_err}")
+    else:
+        print("  [SKIP] Model Registry: S3_BUCKET_NAME not available in environment.")
+
     print("=" * 60)
     print("  [DONE] SageMaker training complete!")
     print("=" * 60)

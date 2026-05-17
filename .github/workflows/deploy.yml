@@ -60,9 +60,7 @@ jobs:
       - name: Configure AWS credentials (OIDC — no long-term keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          # Preferred: keyless OIDC auth (run setup_oidc.py once, then add AWS_ROLE_ARN secret)
           role-to-assume:        ${{ secrets.AWS_ROLE_ARN }}
-          # Fallback: long-term keys (less secure — rotate and migrate to OIDC)
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
@@ -71,13 +69,32 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Step A: Build image locally
+      # Cache Docker layers — speeds up builds by ~60%
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      # Step A: Build image locally (with layer cache)
       - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG:    ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker buildx build \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to   type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --load \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          # Rotate cache to avoid unbounded growth
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
       # Step B: Scan for vulnerabilities BEFORE pushing to ECR
       - name: "🔍 Scan image for vulnerabilities (Trivy)"
@@ -121,9 +138,10 @@ jobs:
       - name: Install SageMaker SDK
         run: pip install boto3 sagemaker python-dotenv
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          role-to-assume:        ${{ secrets.AWS_ROLE_ARN }}
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
@@ -157,12 +175,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          role-to-assume:        ${{ secrets.AWS_ROLE_ARN }}
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
+
+      # Save the CURRENT task definition revision for rollback
+      - name: Save current task definition revision (for rollback)
+        id: current-task
+        run: |
+          CURRENT=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          echo "revision=$CURRENT" >> $GITHUB_OUTPUT
+          echo "  -> Current revision: $CURRENT"
 
       - name: Download current ECS task definition
         run: |
@@ -204,9 +235,10 @@ jobs:
       - name: Install boto3
         run: pip install boto3
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          role-to-assume:        ${{ secrets.AWS_ROLE_ARN }}
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
@@ -226,9 +258,10 @@ jobs:
     if: always()
 
     steps:
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          role-to-assume:        ${{ secrets.AWS_ROLE_ARN }}
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
@@ -245,3 +278,55 @@ jobs:
             --topic-arn "${{ secrets.SNS_TOPIC_ARN }}" \
             --subject   "AttritionIQ CI/CD — $STATUS" \
             --message   "$MSG" || echo "SNS publish skipped (topic not configured)"
+
+  # ── Stage 7: Auto-Rollback (runs ONLY on failure) ──────────
+  rollback:
+    name: "⏪ Auto-Rollback ECS"
+    needs: [deploy-ecs, verify]
+    runs-on: ubuntu-latest
+    # Only run if deploy or verify failed — not on success
+    if: |
+      always() &&
+      (needs.deploy-ecs.result == 'failure' || needs.verify.result == 'failure')
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:        ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Rollback ECS to previous task definition
+        run: |
+          echo "⏪ Rolling back ECS service to previous task definition..."
+          # Get the previous (N-1) task definition revision
+          FAMILY=${{ env.TASK_FAMILY }}
+          CURRENT=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          echo "  Current (failed): $CURRENT"
+
+          # Extract revision number and decrement by 1
+          CURRENT_REV=$(echo $CURRENT | grep -o '[0-9]*$')
+          PREV_REV=$((CURRENT_REV - 1))
+          PREV_TASK="arn:aws:ecs:${{ env.AWS_REGION }}:$(aws sts get-caller-identity --query Account --output text):task-definition/$FAMILY:$PREV_REV"
+          echo "  Rolling back to: $PREV_TASK"
+
+          aws ecs update-service \
+            --cluster  ${{ env.ECS_CLUSTER }} \
+            --service  ${{ env.ECS_SERVICE }} \
+            --task-definition $PREV_TASK
+
+          echo "  ✅ Rollback initiated — ECS will restore previous version."
+
+      - name: Notify rollback via SNS
+        run: |
+          aws sns publish \
+            --topic-arn "${{ secrets.SNS_TOPIC_ARN }}" \
+            --subject   "⏪ AttritionIQ — Auto-Rollback Triggered" \
+            --message   "Deployment FAILED on commit ${{ github.sha }}. ECS has been automatically rolled back to the previous version. Review: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            || echo "SNS publish skipped"
