@@ -137,8 +137,8 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install SageMaker SDK
-        run: pip install boto3 "sagemaker>=2.150.0,<3.0.0" python-dotenv scikit-learn imbalanced-learn pandas numpy joblib
+      - name: Install dependencies (boto3 only — no sagemaker SDK needed)
+        run: pip install boto3 python-dotenv
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
