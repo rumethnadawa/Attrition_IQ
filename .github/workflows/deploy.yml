@@ -4,10 +4,16 @@ on:
   push:
     branches: [AttritionIQ]
   workflow_dispatch:
+    inputs:
+      run_full_pipeline:
+        description: "Run full pipeline (SageMaker + ECS deploy)?"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
 
-# Required for GitHub OIDC token (keyless AWS auth)
 permissions:
-  id-token: write   # needed when AWS_ROLE_ARN is set
+  id-token: write
   contents: read
   actions:  read
 
@@ -23,7 +29,7 @@ env:
 jobs:
 
   # ── Stage 1: Test ──────────────────────────────────────────
-  # Tests mock all AWS calls — no real credentials needed here
+  # Runs on EVERY push — all AWS calls are mocked
   test:
     name: "🧪 Run Test Suite"
     runs-on: ubuntu-latest
@@ -42,13 +48,13 @@ jobs:
       - name: Run pytest (AWS is fully mocked)
         run: pytest tests/ -v --tb=short
         env:
-          # Dummy values — all AWS calls are mocked in tests
           AWS_ACCESS_KEY_ID:     dummy
           AWS_SECRET_ACCESS_KEY: dummy
           AWS_DEFAULT_REGION:    ${{ env.AWS_REGION }}
           S3_BUCKET_NAME:        dummy-bucket
 
   # ── Stage 2: Build, Scan & Push Docker Image to ECR ────────
+  # Runs on EVERY push
   build:
     name: "🐳 Build, Scan & Push to ECR"
     needs: test
@@ -62,8 +68,6 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          # If AWS_ROLE_ARN secret is set → uses OIDC (keyless)
-          # If not set         → falls back to access key + secret below
           role-to-assume:        ${{ secrets.AWS_ROLE_ARN }}
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -73,7 +77,6 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Cache Docker layers — speeds up builds by ~60%
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -85,7 +88,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
-      # Step A: Build image locally (with layer cache)
       - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -99,17 +101,15 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
-      # Step B: Scan for vulnerabilities BEFORE pushing to ECR
       - name: "🔍 Scan image for vulnerabilities (Trivy)"
         uses: aquasecurity/trivy-action@master
         with:
           image-ref:      "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
           format:         "table"
-          exit-code:      "0"     # warn only — change to '1' to block on CRITICAL
+          exit-code:      "0"
           severity:       "CRITICAL,HIGH"
           ignore-unfixed: true
 
-      # Step C: Push to ECR
       - name: Tag & push image to ECR
         id: push-image
         env:
@@ -122,11 +122,13 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-  # ── Stage 3: SageMaker Training Job ────────────────────────
+  # ── Stage 3: SageMaker Training ────────────────────────────
+  # ONLY runs when manually triggered with run_full_pipeline=true
   sagemaker-train:
     name: "🤖 SageMaker Training"
     needs: build
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_full_pipeline == 'true' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -137,7 +139,7 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install dependencies (boto3 only — no sagemaker SDK needed)
+      - name: Install dependencies (boto3 only)
         run: pip install boto3 python-dotenv
 
       - name: Configure AWS credentials
@@ -167,10 +169,12 @@ jobs:
           path: .sagemaker_model_uri
 
   # ── Stage 4: Deploy to ECS Fargate ─────────────────────────
+  # ONLY runs when manually triggered with run_full_pipeline=true
   deploy-ecs:
     name: "🚀 Deploy to ECS Fargate"
     needs: [build, sagemaker-train]
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_full_pipeline == 'true' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -211,6 +215,7 @@ jobs:
     name: "✅ Verify Deployment"
     needs: deploy-ecs
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_full_pipeline == 'true' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -241,7 +246,7 @@ jobs:
   # ── Stage 6: Notify via SNS ────────────────────────────────
   notify:
     name: "📣 Pipeline Notification"
-    needs: verify
+    needs: [build, verify]
     runs-on: ubuntu-latest
     if: always()
 
@@ -256,24 +261,27 @@ jobs:
 
       - name: Send pipeline result via SNS
         run: |
-          STATUS="${{ needs.verify.result }}"
-          if [ "$STATUS" = "success" ]; then
-            MSG="✅ AttritionIQ deployment SUCCEEDED on commit ${{ github.sha }} by ${{ github.actor }}"
+          BUILD="${{ needs.build.result }}"
+          VERIFY="${{ needs.verify.result }}"
+          if [ "$BUILD" = "success" ]; then
+            MSG="✅ AttritionIQ build SUCCEEDED (commit ${{ github.sha }} by ${{ github.actor }}). Image pushed to ECR."
           else
-            MSG="❌ AttritionIQ deployment FAILED on commit ${{ github.sha }}. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            MSG="❌ AttritionIQ pipeline FAILED on commit ${{ github.sha }}. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
           aws sns publish \
             --topic-arn "${{ secrets.SNS_TOPIC_ARN }}" \
-            --subject   "AttritionIQ CI/CD — $STATUS" \
-            --message   "$MSG" || echo "SNS publish skipped (SNS_TOPIC_ARN not configured)"
+            --subject   "AttritionIQ CI/CD — $BUILD" \
+            --message   "$MSG" || echo "SNS skipped (topic not configured)"
 
-  # ── Stage 7: Auto-Rollback (runs ONLY on failure) ──────────
+  # ── Stage 7: Auto-Rollback (only on full pipeline failure) ─
   rollback:
     name: "⏪ Auto-Rollback ECS"
     needs: [deploy-ecs, verify]
     runs-on: ubuntu-latest
     if: |
       always() &&
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.run_full_pipeline == 'true' &&
       (needs.deploy-ecs.result == 'failure' || needs.verify.result == 'failure')
 
     steps:
@@ -287,14 +295,13 @@ jobs:
 
       - name: Rollback ECS to previous task definition
         run: |
-          echo "⏪ Rolling back ECS service to previous task definition..."
+          echo "⏪ Rolling back ECS service..."
           FAMILY=${{ env.TASK_FAMILY }}
           CURRENT=$(aws ecs describe-services \
             --cluster ${{ env.ECS_CLUSTER }} \
             --services ${{ env.ECS_SERVICE }} \
             --query 'services[0].taskDefinition' \
             --output text)
-          echo "  Current (failed): $CURRENT"
           CURRENT_REV=$(echo $CURRENT | grep -o '[0-9]*$')
           PREV_REV=$((CURRENT_REV - 1))
           ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
@@ -311,5 +318,5 @@ jobs:
           aws sns publish \
             --topic-arn "${{ secrets.SNS_TOPIC_ARN }}" \
             --subject   "⏪ AttritionIQ — Auto-Rollback Triggered" \
-            --message   "Deployment FAILED on commit ${{ github.sha }}. ECS has been automatically rolled back. Review: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            || echo "SNS publish skipped"
+            --message   "Deployment FAILED. ECS rolled back. Review: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            || echo "SNS skipped"
