@@ -5,6 +5,12 @@ on:
     branches: [AttritionIQ]
   workflow_dispatch:
 
+# Required for GitHub OIDC token (keyless AWS auth)
+permissions:
+  id-token:      write   # needed to request OIDC JWT
+  contents:      read    # needed to checkout code
+  actions:       read
+
 env:
   AWS_REGION:       us-east-1
   ECR_REPOSITORY:   attritioniq-app
@@ -40,20 +46,23 @@ jobs:
           AWS_DEFAULT_REGION:    ${{ env.AWS_REGION }}
           S3_BUCKET_NAME:        ${{ secrets.S3_BUCKET }}
 
-  # ── Stage 2: Build & Push Docker Image to ECR ──────────────
+  # ── Stage 2: Build, Scan & Push Docker Image to ECR ────────
   build:
-    name: "🐳 Build & Push to ECR"
+    name: "🐳 Build, Scan & Push to ECR"
     needs: test
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.build-image.outputs.image }}
+      image: ${{ steps.push-image.outputs.image }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC — no long-term keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          # Preferred: keyless OIDC auth (run setup_oidc.py once, then add AWS_ROLE_ARN secret)
+          role-to-assume:        ${{ secrets.AWS_ROLE_ARN }}
+          # Fallback: long-term keys (less secure — rotate and migrate to OIDC)
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
@@ -62,18 +71,37 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image
-        id: build-image
+      # Step A: Build image locally
+      - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG:    ${{ github.sha }}
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker push  $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker tag   $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-                       $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          docker push  $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      # Step B: Scan for vulnerabilities BEFORE pushing to ECR
+      - name: "🔍 Scan image for vulnerabilities (Trivy)"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:      "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          format:         "table"
+          exit-code:      "0"        # '0' = warn only; change to '1' to block on CRITICAL
+          severity:       "CRITICAL,HIGH"
+          ignore-unfixed: true
+
+      # Step C: Push clean image to ECR
+      - name: Tag & push image to ECR
+        id: push-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag  $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                      $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
 
   # ── Stage 3: SageMaker Training Job ────────────────────────
   sagemaker-train:
