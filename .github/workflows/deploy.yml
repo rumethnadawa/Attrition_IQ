@@ -185,9 +185,8 @@ jobs:
 
       - name: Bootstrap ECS infrastructure (first-time setup)
         env:
-          IMAGE:      ${{ needs.build.outputs.image }}
-          S3_BUCKET:  ${{ secrets.S3_BUCKET }}
-          ACCOUNT_ID: ${{ steps.creds.outputs.aws-account-id }}
+          IMAGE:     ${{ needs.build.outputs.image }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
           set -e
           ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
