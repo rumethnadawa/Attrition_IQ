@@ -159,7 +159,7 @@ jobs:
         run: |
           python sagemaker_pipeline.py \
             --mode train \
-            --job-suffix ${{ github.sha }} \
+            --job-suffix ${{ github.run_id }}-${{ github.run_attempt }} \
             --s3-bucket  ${{ secrets.S3_BUCKET }}
 
       - name: Upload model URI artifact

@@ -105,7 +105,9 @@ def run_training(role_arn, job_suffix="latest"):
     source_uri     = package_and_upload_source()
 
     # Job name: only alphanumeric + hyphens, max 63 chars
-    safe_suffix = job_suffix[:7].replace("_", "-")
+    import re
+    # Keep full suffix (run_id-run_attempt); strip any char not alphanumeric/hyphen
+    safe_suffix = re.sub(r'[^a-zA-Z0-9-]', '-', job_suffix)[:40].strip('-')
     job_name    = f"{JOB_PREFIX}-{safe_suffix}"
 
     print(f"  -> Job name  : {job_name}")
