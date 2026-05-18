@@ -58,3 +58,6 @@ cdk.out/
 
 # Logs
 *.log
+
+# Embedded nested repo (contains its own .git — tracked externally)
+Attrition_IQ/
