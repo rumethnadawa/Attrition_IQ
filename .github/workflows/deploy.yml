@@ -194,11 +194,16 @@ jobs:
           LOG_GROUP="/ecs/attritioniq"
 
           # ── 1. ECS Cluster ──────────────────────────────────
-          aws ecs create-cluster \
-            --cluster-name ${{ env.ECS_CLUSTER }} \
-            --capacity-providers FARGATE \
-            --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1 \
-            2>/dev/null || echo "Cluster already exists"
+          CLUSTER_STATUS=$(aws ecs describe-clusters \
+            --clusters ${{ env.ECS_CLUSTER }} \
+            --query 'clusters[0].status' --output text 2>/dev/null || echo "MISSING")
+          if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
+            echo "Creating ECS cluster..."
+            aws ecs create-cluster --cluster-name ${{ env.ECS_CLUSTER }}
+            echo "  -> Cluster created: ${{ env.ECS_CLUSTER }}"
+          else
+            echo "  -> Cluster already ACTIVE: ${{ env.ECS_CLUSTER }}"
+          fi
 
           # ── 2. IAM Execution Role ───────────────────────────
           if ! aws iam get-role --role-name ecsTaskExecutionRole 2>/dev/null; then
