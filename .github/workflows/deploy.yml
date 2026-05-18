@@ -183,28 +183,128 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
-      - name: Download current ECS task definition
+      - name: Bootstrap ECS infrastructure (first-time setup)
+        env:
+          IMAGE:      ${{ needs.build.outputs.image }}
+          S3_BUCKET:  ${{ secrets.S3_BUCKET }}
+          ACCOUNT_ID: ${{ steps.creds.outputs.aws-account-id }}
         run: |
-          aws ecs describe-task-definition \
+          set -e
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          EXEC_ROLE_ARN="arn:aws:iam::${ACCOUNT}:role/ecsTaskExecutionRole"
+          LOG_GROUP="/ecs/attritioniq"
+
+          # ── 1. ECS Cluster ──────────────────────────────────
+          aws ecs create-cluster \
+            --cluster-name ${{ env.ECS_CLUSTER }} \
+            --capacity-providers FARGATE \
+            --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1 \
+            2>/dev/null || echo "Cluster already exists"
+
+          # ── 2. IAM Execution Role ───────────────────────────
+          if ! aws iam get-role --role-name ecsTaskExecutionRole 2>/dev/null; then
+            aws iam create-role \
+              --role-name ecsTaskExecutionRole \
+              --assume-role-policy-document '{
+                "Version":"2012-10-17",
+                "Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]
+              }'
+            aws iam attach-role-policy --role-name ecsTaskExecutionRole \
+              --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+            aws iam attach-role-policy --role-name ecsTaskExecutionRole \
+              --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess
+            aws iam attach-role-policy --role-name ecsTaskExecutionRole \
+              --policy-arn arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+            sleep 15
+          fi
+
+          # ── 3. CloudWatch Log Group ─────────────────────────
+          aws logs create-log-group --log-group-name "$LOG_GROUP" 2>/dev/null || echo "Log group exists"
+
+          # ── 4. Register / Update Task Definition ───────────
+          aws ecs register-task-definition \
+            --family          ${{ env.TASK_FAMILY }} \
+            --network-mode    awsvpc \
+            --requires-compatibilities FARGATE \
+            --cpu             1024 \
+            --memory          2048 \
+            --execution-role-arn "$EXEC_ROLE_ARN" \
+            --task-role-arn   "$EXEC_ROLE_ARN" \
+            --container-definitions "[{
+              \"name\": \"${{ env.CONTAINER_NAME }}\",
+              \"image\": \"${IMAGE}\",
+              \"essential\": true,
+              \"portMappings\": [{\"containerPort\": 8000, \"protocol\": \"tcp\"}],
+              \"environment\": [
+                {\"name\": \"AWS_DEFAULT_REGION\", \"value\": \"${{ env.AWS_REGION }}\"},
+                {\"name\": \"S3_BUCKET_NAME\",      \"value\": \"${S3_BUCKET}\"}
+              ],
+              \"logConfiguration\": {
+                \"logDriver\": \"awslogs\",
+                \"options\": {
+                  \"awslogs-group\": \"${LOG_GROUP}\",
+                  \"awslogs-region\": \"${{ env.AWS_REGION }}\",
+                  \"awslogs-stream-prefix\": \"ecs\"
+                }
+              }
+            }]"
+
+          TASK_ARN=$(aws ecs describe-task-definition \
             --task-definition ${{ env.TASK_FAMILY }} \
-            --query taskDefinition \
-            > task-definition.json
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "TASK_ARN=$TASK_ARN" >> $GITHUB_ENV
+          echo "task-definition registered: $TASK_ARN"
 
-      - name: Update task definition with new image
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name:  ${{ env.CONTAINER_NAME }}
-          image:           ${{ needs.build.outputs.image }}
+          # ── 5. ECS Service (create or update) ───────────────
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters Name=isDefault,Values=true \
+            --query 'Vpcs[0].VpcId' --output text)
+          SUBNETS=$(aws ec2 describe-subnets \
+            --filters Name=vpc-id,Values=${VPC_ID} \
+            --query 'Subnets[*].SubnetId' --output text | tr '\t' ',' | cut -d',' -f1,2)
 
-      - name: Deploy updated task to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition:            ${{ steps.task-def.outputs.task-definition }}
-          service:                    ${{ env.ECS_SERVICE }}
-          cluster:                    ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
+          # Security group
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters Name=group-name,Values=attritioniq-sg Name=vpc-id,Values=${VPC_ID} \
+            --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+          if [ "$SG_ID" = "None" ] || [ -z "$SG_ID" ]; then
+            SG_ID=$(aws ec2 create-security-group \
+              --group-name attritioniq-sg \
+              --description "AttritionIQ ECS" \
+              --vpc-id ${VPC_ID} \
+              --query GroupId --output text)
+            aws ec2 authorize-security-group-ingress \
+              --group-id ${SG_ID} \
+              --protocol tcp --port 8000 --cidr 0.0.0.0/0
+          fi
+
+          # Create or update service
+          if aws ecs describe-services \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --services ${{ env.ECS_SERVICE }} \
+              --query 'services[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
+            echo "Updating existing ECS service..."
+            aws ecs update-service \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --service ${{ env.ECS_SERVICE }} \
+              --task-definition ${{ env.TASK_FAMILY }} \
+              --force-new-deployment
+          else
+            echo "Creating new ECS service..."
+            aws ecs create-service \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --service-name ${{ env.ECS_SERVICE }} \
+              --task-definition ${{ env.TASK_FAMILY }} \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}"
+          fi
+
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }}
+          echo "ECS service is stable!"
 
   # ── Stage 5: Verify Live Deployment ────────────────────────
   verify:
