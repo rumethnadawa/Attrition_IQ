@@ -9,3 +9,22 @@ venv/
 .venv
 .git
 .vscode/
+
+# Model artifacts & outputs (downloaded from S3 at runtime)
+models/
+outputs/
+*.pkl
+
+# Large data files (stored in S3)
+*.csv
+*.gz
+*.tar.gz
+
+# Deployment & setup scripts (not needed in container)
+deploy_ecs.py
+setup_s3.py
+test_dynamo.py
+analysis_pipeline.py
+
+# Keys
+*.pem

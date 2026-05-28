@@ -52,7 +52,7 @@ print("=" * 60)
 # *********************************************
 #  STEP 1 - LOAD DATA
 # *********************************************
-print("\n[1/6] Loading dataset...")
+print("\n[1/8] Loading dataset...")
 df = pd.read_csv(DATA_PATH)
 
 print(f"  -> Shape        : {df.shape}")
@@ -66,7 +66,7 @@ print(df['Attrition'].value_counts(normalize=True).round(3))
 # *********************************************
 #  STEP 2 - EXPLORATORY DATA ANALYSIS (EDA)
 # *********************************************
-print("\n[2/6] Performing Exploratory Data Analysis...")
+print("\n[2/8] Performing Exploratory Data Analysis...")
 
 # 2a. Target Distribution Plot
 plt.figure(figsize=(6, 4))
@@ -117,7 +117,7 @@ print("  -> EDA plots saved to outputs/eda/")
 # *********************************************
 #  STEP 3 - PRE-PROCESSING
 # *********************************************
-print("\n[3/6] Pre-processing...")
+print("\n[3/8] Pre-processing...")
 
 # 3a. Drop useless constant columns
 DROP_COLS = ['EmployeeCount', 'EmployeeNumber', 'Over18', 'StandardHours']
@@ -164,7 +164,7 @@ joblib.dump(scaler, f"{MODEL_DIR}/scaler.pkl")
 # *********************************************
 #  STEP 4 - MODEL TRAINING
 # *********************************************
-print("\n[4/6] Training models...")
+print("\n[4/8] Training models...")
 
 models = {
     "Logistic Regression":       LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42),
@@ -213,7 +213,7 @@ for name, model in models.items():
 # *********************************************
 #  STEP 5 - EVALUATION & PLOTS
 # *********************************************
-print("\n[5/6] Evaluating & generating plots...")
+print("\n[5/8] Evaluating & generating plots...")
 
 # Comparison Table
 summary = pd.DataFrame([
@@ -283,7 +283,7 @@ print(classification_report(y_test, best_r['y_pred'], target_names=['Stay', 'Lea
 # *********************************************
 #  STEP 6 - HYPERPARAMETER TUNING & SHAP
 # *********************************************
-print(f"\n[6/7] Hyperparameter Tuning on Best Model ({best_name})...")
+print(f"\n[6/8] Hyperparameter Tuning on Best Model ({best_name})...")
 
 param_grid = {}
 if best_name == "Random Forest":
@@ -345,7 +345,7 @@ else:
 # *********************************************
 #  STEP 7 - SAVE FINAL MODEL (DEPLOYMENT)
 # *********************************************
-print(f"\n[7/7] Saving final optimized model: {best_name}...")
+print(f"\n[7/8] Saving final optimized model: {best_name}...")
 joblib.dump(final_model, f"{MODEL_DIR}/best_model.pkl")
 joblib.dump(list(X.columns),  f"{MODEL_DIR}/feature_names.pkl")
 print(f"  -> Model saved  -> models/best_model.pkl")
@@ -357,29 +357,51 @@ print("\n[8/8] Uploading artifacts to Amazon S3...")
 s3_bucket = os.getenv("S3_BUCKET_NAME")
 if s3_bucket:
     s3 = boto3.client('s3')
-    
-    # Files to upload (local_path, s3_key)
-    artifacts = [
-        (DATA_PATH, "data/WA_Fn-UseC_-HR-Employee-Attrition.csv"),
-        (f"{MODEL_DIR}/best_model.pkl", "models/best_model.pkl"),
-        (f"{MODEL_DIR}/feature_names.pkl", "models/feature_names.pkl"),
+
+    def upload_to_s3(local_path, s3_key):
+        """Upload a single file to S3, printing result."""
+        if os.path.exists(local_path):
+            print(f"  -> Uploading {local_path} to s3://{s3_bucket}/{s3_key}")
+            try:
+                s3.upload_file(local_path, s3_bucket, s3_key)
+            except Exception as e:
+                print(f"     ! Failed to upload {local_path}: {e}")
+        else:
+            print(f"     ! Skipped (not found): {local_path}")
+
+    # --- Model artifacts ---
+    upload_to_s3(f"{MODEL_DIR}/best_model.pkl",     "models/best_model.pkl")
+    upload_to_s3(f"{MODEL_DIR}/feature_names.pkl",  "models/feature_names.pkl")
+    upload_to_s3(f"{MODEL_DIR}/scaler.pkl",         "models/scaler.pkl")
+
+    # --- Dataset ---
+    upload_to_s3(DATA_PATH, "data/WA_Fn-UseC_-HR-Employee-Attrition.csv")
+
+    # --- Output charts ---
+    output_charts = [
+        (f"{OUTPUT_DIR}/roc_curves.png",           "outputs/roc_curves.png"),
+        (f"{OUTPUT_DIR}/confusion_matrices.png",   "outputs/confusion_matrices.png"),
+        (f"{OUTPUT_DIR}/feature_importance.png",   "outputs/feature_importance.png"),
+        (f"{OUTPUT_DIR}/shap_summary.png",         "outputs/shap_summary.png"),
+        (f"{OUTPUT_DIR}/model_comparison.csv",     "outputs/model_comparison.csv"),
     ]
-    
-    # Also upload scaler if it exists
-    if os.path.exists(f"{MODEL_DIR}/scaler.pkl"):
-        artifacts.append((f"{MODEL_DIR}/scaler.pkl", "models/scaler.pkl"))
-        
-    for local_path, s3_key in artifacts:
-        print(f"  -> Uploading {local_path} to s3://{s3_bucket}/{s3_key}")
-        try:
-            s3.upload_file(local_path, s3_bucket, s3_key)
-        except Exception as e:
-            print(f"     ! Failed to upload {local_path}: {e}")
-            
+    for local_path, s3_key in output_charts:
+        upload_to_s3(local_path, s3_key)
+
+    # --- EDA plots ---
+    eda_charts = [
+        (f"{EDA_DIR}/attrition_distribution.png",  "outputs/eda/attrition_distribution.png"),
+        (f"{EDA_DIR}/numeric_boxplots.png",         "outputs/eda/numeric_boxplots.png"),
+        (f"{EDA_DIR}/categorical_countplots.png",   "outputs/eda/categorical_countplots.png"),
+        (f"{EDA_DIR}/correlation_matrix.png",       "outputs/eda/correlation_matrix.png"),
+    ]
+    for local_path, s3_key in eda_charts:
+        upload_to_s3(local_path, s3_key)
+
     print("  -> S3 Upload complete!")
 else:
     print("  -> S3_BUCKET_NAME not found in .env, skipping upload.")
 
 print("\n" + "=" * 60)
-print("  ✅ Pipeline complete!")
+print("  [DONE] Pipeline complete!")
 print("=" * 60)

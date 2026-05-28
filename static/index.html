@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IBM HR Attrition Predictor</title>
+    <title>AttritionIQ – HR Attrition Predictor</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
@@ -294,19 +294,19 @@
                     <div class="image-grid">
                         <div class="img-card">
                             <h3>Attrition Distribution</h3>
-                            <img src="/outputs/eda/attrition_distribution.png" alt="Attrition Distribution">
+                            <img id="img-attrition-distribution" src="/outputs/eda/attrition_distribution.png" alt="Attrition Distribution">
                         </div>
                         <div class="img-card">
                             <h3>Categorical Features vs Attrition</h3>
-                            <img src="/outputs/eda/categorical_countplots.png" alt="Categorical Features">
+                            <img id="img-categorical-countplots" src="/outputs/eda/categorical_countplots.png" alt="Categorical Features">
                         </div>
                         <div class="img-card">
                             <h3>Numeric Features Boxplots</h3>
-                            <img src="/outputs/eda/numeric_boxplots.png" alt="Numeric Features">
+                            <img id="img-numeric-boxplots" src="/outputs/eda/numeric_boxplots.png" alt="Numeric Features">
                         </div>
                         <div class="img-card">
                             <h3>Correlation Matrix</h3>
-                            <img src="/outputs/eda/correlation_matrix.png" alt="Correlation Matrix">
+                            <img id="img-correlation-matrix" src="/outputs/eda/correlation_matrix.png" alt="Correlation Matrix">
                         </div>
                     </div>
                 </div>
@@ -369,11 +369,11 @@
                     <div class="image-grid" style="margin-top: 3rem;">
                         <div class="img-card full-width">
                             <h3>ROC Curves (Visual Comparison)</h3>
-                            <img src="/outputs/roc_curves.png" alt="ROC Curves">
+                            <img id="img-roc-curves" src="/outputs/roc_curves.png" alt="ROC Curves">
                         </div>
                         <div class="img-card full-width">
                             <h3>Confusion Matrices (Detailed Breakdown)</h3>
-                            <img src="/outputs/confusion_matrices.png" alt="Confusion Matrices">
+                            <img id="img-confusion-matrices" src="/outputs/confusion_matrices.png" alt="Confusion Matrices">
                         </div>
                     </div>
                 </div>
@@ -389,12 +389,12 @@
                     <div class="image-grid">
                         <div class="img-card">
                             <h3>Feature Importance</h3>
-                            <img src="/outputs/feature_importance.png" alt="Feature Importance">
+                            <img id="img-feature-importance" src="/outputs/feature_importance.png" alt="Feature Importance">
                         </div>
                         <div class="img-card">
                             <h3>SHAP Explainability Summary</h3>
                             <p class="small-text">SHAP values show the directional impact of features on the prediction (e.g. OverTime, MonthlyIncome).</p>
-                            <img src="/outputs/shap_summary.png" alt="SHAP Summary">
+                            <img id="img-shap-summary" src="/outputs/shap_summary.png" alt="SHAP Summary">
                         </div>
                     </div>
                 </div>

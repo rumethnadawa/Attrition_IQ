@@ -1,0 +1,419 @@
+name: AttritionIQ CI/CD Pipeline
+
+on:
+  push:
+    branches: [AttritionIQ]
+  workflow_dispatch:
+    inputs:
+      run_full_pipeline:
+        description: "Run full pipeline (SageMaker + ECS deploy)?"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+permissions:
+  contents: read
+  actions:  read
+
+env:
+  AWS_REGION:       us-east-1
+  ECR_REPOSITORY:   attritioniq-app
+  ECS_CLUSTER:      attritioniq-cluster
+  ECS_SERVICE:      attritioniq-service
+  CONTAINER_NAME:   attritioniq-container
+  TASK_FAMILY:      attritioniq-task
+
+# ──────────────────────────────────────────────────────────────
+jobs:
+
+  # ── Stage 1: Test ──────────────────────────────────────────
+  # Runs on EVERY push — all AWS calls are mocked
+  test:
+    name: "🧪 Run Test Suite"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest httpx
+
+      - name: Run pytest (AWS is fully mocked)
+        run: pytest tests/ -v --tb=short
+        env:
+          AWS_ACCESS_KEY_ID:     dummy
+          AWS_SECRET_ACCESS_KEY: dummy
+          AWS_DEFAULT_REGION:    ${{ env.AWS_REGION }}
+          S3_BUCKET_NAME:        dummy-bucket
+
+  # ── Stage 2: Build, Scan & Push Docker Image to ECR ────────
+  # Runs on EVERY push
+  build:
+    name: "🐳 Build, Scan & Push to ECR"
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.push-image.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          docker buildx build \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to   type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --load \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: "🔍 Scan image for vulnerabilities (Trivy)"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:      "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          format:         "table"
+          exit-code:      "0"
+          severity:       "CRITICAL,HIGH"
+          ignore-unfixed: true
+
+      - name: Tag & push image to ECR
+        id: push-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag  $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                      $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  # ── Stage 3: SageMaker Training ────────────────────────────
+  # ONLY runs when manually triggered with run_full_pipeline=true
+  sagemaker-train:
+    name: "🤖 SageMaker Training"
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_full_pipeline == 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies (boto3 only)
+        run: pip install boto3 python-dotenv
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Create .env for pipeline script
+        run: |
+          echo "AWS_DEFAULT_REGION=${{ env.AWS_REGION }}" >> .env
+          echo "S3_BUCKET_NAME=${{ secrets.S3_BUCKET }}"  >> .env
+
+      - name: Run SageMaker training job
+        run: |
+          python sagemaker_pipeline.py \
+            --mode train \
+            --job-suffix ${{ github.run_id }}-${{ github.run_attempt }} \
+            --s3-bucket  ${{ secrets.S3_BUCKET }}
+
+      - name: Upload model URI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sagemaker-model-uri
+          path: .sagemaker_model_uri
+
+  # ── Stage 4: Deploy to ECS Fargate ─────────────────────────
+  # ONLY runs when manually triggered with run_full_pipeline=true
+  deploy-ecs:
+    name: "🚀 Deploy to ECS Fargate"
+    needs: [build, sagemaker-train]
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_full_pipeline == 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Bootstrap ECS infrastructure (first-time setup)
+        env:
+          IMAGE:     ${{ needs.build.outputs.image }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          set -e
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          EXEC_ROLE_ARN="arn:aws:iam::${ACCOUNT}:role/ecsTaskExecutionRole"
+          LOG_GROUP="/ecs/attritioniq"
+
+          # ── 1. ECS Cluster ──────────────────────────────────
+          CLUSTER_STATUS=$(aws ecs describe-clusters \
+            --clusters ${{ env.ECS_CLUSTER }} \
+            --query 'clusters[0].status' --output text 2>/dev/null || echo "MISSING")
+          if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
+            echo "Creating ECS cluster..."
+            aws ecs create-cluster --cluster-name ${{ env.ECS_CLUSTER }}
+            echo "  -> Cluster created: ${{ env.ECS_CLUSTER }}"
+          else
+            echo "  -> Cluster already ACTIVE: ${{ env.ECS_CLUSTER }}"
+          fi
+
+          # ── 2. IAM Execution Role ───────────────────────────
+          if ! aws iam get-role --role-name ecsTaskExecutionRole 2>/dev/null; then
+            aws iam create-role \
+              --role-name ecsTaskExecutionRole \
+              --assume-role-policy-document '{
+                "Version":"2012-10-17",
+                "Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]
+              }'
+            aws iam attach-role-policy --role-name ecsTaskExecutionRole \
+              --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+            aws iam attach-role-policy --role-name ecsTaskExecutionRole \
+              --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess
+            aws iam attach-role-policy --role-name ecsTaskExecutionRole \
+              --policy-arn arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+            sleep 15
+          fi
+
+          # ── 3. CloudWatch Log Group ─────────────────────────
+          aws logs create-log-group --log-group-name "$LOG_GROUP" 2>/dev/null || echo "Log group exists"
+
+          # ── 4. Register / Update Task Definition ───────────
+          aws ecs register-task-definition \
+            --family          ${{ env.TASK_FAMILY }} \
+            --network-mode    awsvpc \
+            --requires-compatibilities FARGATE \
+            --cpu             1024 \
+            --memory          2048 \
+            --execution-role-arn "$EXEC_ROLE_ARN" \
+            --task-role-arn   "$EXEC_ROLE_ARN" \
+            --container-definitions "[{
+              \"name\": \"${{ env.CONTAINER_NAME }}\",
+              \"image\": \"${IMAGE}\",
+              \"essential\": true,
+              \"portMappings\": [{\"containerPort\": 8000, \"protocol\": \"tcp\"}],
+              \"environment\": [
+                {\"name\": \"AWS_DEFAULT_REGION\", \"value\": \"${{ env.AWS_REGION }}\"},
+                {\"name\": \"S3_BUCKET_NAME\",      \"value\": \"${S3_BUCKET}\"}
+              ],
+              \"logConfiguration\": {
+                \"logDriver\": \"awslogs\",
+                \"options\": {
+                  \"awslogs-group\": \"${LOG_GROUP}\",
+                  \"awslogs-region\": \"${{ env.AWS_REGION }}\",
+                  \"awslogs-stream-prefix\": \"ecs\"
+                }
+              }
+            }]"
+
+          TASK_ARN=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.TASK_FAMILY }} \
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "TASK_ARN=$TASK_ARN" >> $GITHUB_ENV
+          echo "task-definition registered: $TASK_ARN"
+
+          # ── 5. ECS Service (create or update) ───────────────
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters Name=isDefault,Values=true \
+            --query 'Vpcs[0].VpcId' --output text)
+          SUBNETS=$(aws ec2 describe-subnets \
+            --filters Name=vpc-id,Values=${VPC_ID} \
+            --query 'Subnets[*].SubnetId' --output text | tr '\t' ',' | cut -d',' -f1,2)
+
+          # Security group
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters Name=group-name,Values=attritioniq-sg Name=vpc-id,Values=${VPC_ID} \
+            --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+          if [ "$SG_ID" = "None" ] || [ -z "$SG_ID" ]; then
+            SG_ID=$(aws ec2 create-security-group \
+              --group-name attritioniq-sg \
+              --description "AttritionIQ ECS" \
+              --vpc-id ${VPC_ID} \
+              --query GroupId --output text)
+            aws ec2 authorize-security-group-ingress \
+              --group-id ${SG_ID} \
+              --protocol tcp --port 8000 --cidr 0.0.0.0/0
+          fi
+
+          # Create or update service
+          if aws ecs describe-services \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --services ${{ env.ECS_SERVICE }} \
+              --query 'services[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
+            echo "Updating existing ECS service..."
+            aws ecs update-service \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --service ${{ env.ECS_SERVICE }} \
+              --task-definition ${{ env.TASK_FAMILY }} \
+              --force-new-deployment
+          else
+            echo "Creating new ECS service..."
+            aws ecs create-service \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --service-name ${{ env.ECS_SERVICE }} \
+              --task-definition ${{ env.TASK_FAMILY }} \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}"
+          fi
+
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }}
+          echo "ECS service is stable!"
+
+  # ── Stage 5: Verify Live Deployment ────────────────────────
+  verify:
+    name: "✅ Verify Deployment"
+    needs: deploy-ecs
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_full_pipeline == 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install boto3
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Run health check against live ECS task
+        run: python .github/scripts/verify_deployment.py
+        env:
+          ECS_CLUSTER:        ${{ env.ECS_CLUSTER }}
+          ECS_SERVICE:        ${{ env.ECS_SERVICE }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+
+  # ── Stage 6: Notify via SNS ────────────────────────────────
+  notify:
+    name: "📣 Pipeline Notification"
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Send pipeline result via SNS
+        run: |
+          BUILD="${{ needs.build.result }}"
+          VERIFY="${{ needs.verify.result }}"
+          if [ "$BUILD" = "success" ]; then
+            MSG="✅ AttritionIQ build SUCCEEDED (commit ${{ github.sha }} by ${{ github.actor }}). Image pushed to ECR."
+          else
+            MSG="❌ AttritionIQ pipeline FAILED on commit ${{ github.sha }}. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+          aws sns publish \
+            --topic-arn "${{ secrets.SNS_TOPIC_ARN }}" \
+            --subject   "AttritionIQ CI/CD — $BUILD" \
+            --message   "$MSG" || echo "SNS skipped (topic not configured)"
+
+  # ── Stage 7: Auto-Rollback (only on full pipeline failure) ─
+  rollback:
+    name: "⏪ Auto-Rollback ECS"
+    needs: [deploy-ecs, verify]
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.run_full_pipeline == 'true' &&
+      (needs.deploy-ecs.result == 'failure' || needs.verify.result == 'failure')
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Rollback ECS to previous task definition
+        run: |
+          echo "⏪ Rolling back ECS service..."
+          FAMILY=${{ env.TASK_FAMILY }}
+          CURRENT=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          CURRENT_REV=$(echo $CURRENT | grep -o '[0-9]*$')
+          PREV_REV=$((CURRENT_REV - 1))
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          PREV_TASK="arn:aws:ecs:${{ env.AWS_REGION }}:$ACCOUNT:task-definition/$FAMILY:$PREV_REV"
+          echo "  Rolling back to: $PREV_TASK"
+          aws ecs update-service \
+            --cluster  ${{ env.ECS_CLUSTER }} \
+            --service  ${{ env.ECS_SERVICE }} \
+            --task-definition $PREV_TASK
+          echo "  ✅ Rollback initiated."
+
+      - name: Notify rollback via SNS
+        run: |
+          aws sns publish \
+            --topic-arn "${{ secrets.SNS_TOPIC_ARN }}" \
+            --subject   "⏪ AttritionIQ — Auto-Rollback Triggered" \
+            --message   "Deployment FAILED. ECS rolled back. Review: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            || echo "SNS skipped"
