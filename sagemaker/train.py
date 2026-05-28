@@ -51,6 +51,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-data-dir", type=str,
                         default=os.environ.get("SM_OUTPUT_DATA_DIR",
                                                "/opt/ml/output/data"))
+    # Passed as hyperparameter by sagemaker_pipeline.py
+    parser.add_argument("--s3-bucket-name", type=str, default="")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -140,8 +142,7 @@ if __name__ == "__main__":
 
     # ─── Register in SageMaker Model Registry ───────────────
     print(f"\n[6/6] Registering model in SageMaker Model Registry...")
-    s3_bucket = os.environ.get("SM_HP_S3_BUCKET_NAME",
-                os.environ.get("S3_BUCKET_NAME", ""))
+    s3_bucket = args.s3_bucket_name or os.environ.get("S3_BUCKET_NAME", "")
     model_package_group = "AttritionIQ-Models"
 
     # Determine the model S3 URI (set by SageMaker after training)
